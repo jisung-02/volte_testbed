@@ -24,4 +24,4 @@ _sip._tcp.scscf         1D SRV 0 0 6060 scscf
 
 hss                     1D IN A         PYHSS_IP
 
-; smsc removed (not used - no SMSC container in docker-compose)
+smsc                    1D IN A         SMSC_IP

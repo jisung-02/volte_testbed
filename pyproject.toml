@@ -10,6 +10,8 @@ authors = [
 [dependency-groups]
 dev = [
     "poethepoet>=0.37.0",
+    "pytest>=8.0",
+    "smsutil>=1.1.3",
 ]
 
 [tool.uv]
@@ -71,3 +73,7 @@ cmd = "python scripts/provision_subscribers.py"
 [tool.poe.tasks.setup-host]
 help = "Setup Ubuntu host: kernel modules, sysctl, UE subnet routes, SDR udev, realtime, CPU governor"
 cmd = "sudo ./setup_host.sh --all"
+
+[tool.poe.tasks.smsc-test]
+help = "Run SMSC unit tests"
+cmd = "pytest infrastructure/smsc/tests -v"

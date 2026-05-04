@@ -63,13 +63,14 @@ uv run poe provision
 
 ## 사용 가능한 task
 
-`uv run poe` 로 전체 11개 task 목록 확인.
+`uv run poe` 로 전체 12개 task 목록 확인.
 
 | 카테고리 | task | sudo |
 |---|---|---|
 | eNB | `enb-build`, `enb-run`, `enb-stop`, `enb-logs` | — |
 | EPC | `epc-build`, `epc-run`, `epc-stop`, `epc-status`, `epc-logs` | — |
 | 가입자 | `provision` | — |
+| SMSC | `smsc-test` | — |
 | 호스트 셋업 | `setup-host` | ✅ |
 
 ## 환경 변수 (`.env`)
@@ -89,7 +90,7 @@ uv run poe provision
 | `MCC`, `MNC`, `TAC` | PLMN ID (`001` / `01` / `1`) |
 | `TEST_NETWORK` | docker bridge 서브넷 (`172.22.0.0/24`) |
 | `DOCKER_HOST_IP` | docker 호스트 IP |
-| `*_IP` 시리즈 | 각 컨테이너 IP (HSS, MME, SGW, SMF, UPF, PCRF, DNS, RTPENGINE, PYHSS, ICSCF, SCSCF, PCSCF, WEBUI, MONGO, MYSQL, SRS_ENB, ENTITLEMENT_SERVER) |
+| `*_IP` 시리즈 | 각 컨테이너 IP (HSS, MME, SGW, SMF, UPF, PCRF, DNS, RTPENGINE, PYHSS, ICSCF, SCSCF, PCSCF, WEBUI, MONGO, MYSQL, SRS_ENB, SMSC, ENTITLEMENT_SERVER) |
 | `UE_IPV4_INTERNET` / `UE_IPV4_IMS` | UE APN 서브넷 |
 | `MAX_NUM_UE` | 최대 UE 수 |
 
@@ -115,6 +116,16 @@ sudo $(which uv) run poe setup-host
 sudo systemctl restart volte-testbed-routes
 ```
 
+**SMS 가 안 가짐 (송신 단말이 send failure 표시)** — SMSC 가 MT 를 I-CSCF 로 보냈는데 recipient 가 미등록이면 480 으로 떨어진다. 양쪽 단말이 다 attach 됐는지 먼저 확인:
+```bash
+docker exec pcscf kamctl ul show
+```
+또는 SMSC 로그로 직접 확인:
+```bash
+docker logs smsc 2>&1 | tail -30
+```
+SMSC 가 `415 Unsupported Media Type` 를 반환했다면 단말이 `application/vnd.3gpp.sms` 가 아닌 `text/plain` 으로 보낸 것 — 단말 IMS/SMS 설정 문제.
+
 ## 참조 및 출처
 
 이 testbed 는 [herlesupreeth/docker_open5gs](https://github.com/herlesupreeth/docker_open5gs) 의 구조를 기반으로, 다음 오픈소스 컴포넌트의 도커 구성을 통합한다:
@@ -127,6 +138,7 @@ sudo systemctl restart volte-testbed-routes
 | IMS HSS | [PyHSS](https://github.com/nickvsnetworking/pyhss) | tag `1.0.2` |
 | SDR 추상화 | [SoapySDR](https://github.com/pothosware/SoapySDR) | `soapy-sdr-0.8.1` |
 | 미디어 릴레이 | rtpengine | `infrastructure/rtpengine/Dockerfile` 참조 |
+| SMS (MO+MT) | 자체 구현 (Python + smsutil) | `infrastructure/smsc/` |
 
 기본 OS 이미지: Ubuntu 22.04 (jammy)
 
@@ -138,7 +150,7 @@ volte_testbed/
 ├── .env.example                # 환경 변수 템플릿
 ├── setup_host.sh               # 호스트 OS 셋업 자동화
 ├── pyproject.toml              # poe task 정의
-├── infrastructure/             # 컨테이너 설정 (mme, hss, srsenb, pcscf 등)
+├── infrastructure/             # 컨테이너 설정 (mme, hss, srsenb, pcscf, smsc 등)
 └── scripts/
     ├── provision_subscribers.py
     └── add_ue_routes.py

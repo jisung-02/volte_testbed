@@ -63,13 +63,14 @@ uv run poe provision
 
 ## Available Tasks
 
-Run `uv run poe` to list all 11 tasks.
+Run `uv run poe` to list all 12 tasks.
 
 | Category | task | sudo |
 |---|---|---|
 | eNB | `enb-build`, `enb-run`, `enb-stop`, `enb-logs` | — |
 | EPC | `epc-build`, `epc-run`, `epc-stop`, `epc-status`, `epc-logs` | — |
 | Subscribers | `provision` | — |
+| SMSC | `smsc-test` | — |
 | Host setup | `setup-host` | ✅ |
 
 ## Environment Variables (`.env`)
@@ -89,7 +90,7 @@ After `cp .env.example .env`, adjust to your environment.
 | `MCC`, `MNC`, `TAC` | PLMN ID (`001` / `01` / `1`) |
 | `TEST_NETWORK` | Docker bridge subnet (`172.22.0.0/24`) |
 | `DOCKER_HOST_IP` | Docker host IP |
-| `*_IP` series | Per-container IPs (HSS, MME, SGW, SMF, UPF, PCRF, DNS, RTPENGINE, PYHSS, ICSCF, SCSCF, PCSCF, WEBUI, MONGO, MYSQL, SRS_ENB, ENTITLEMENT_SERVER) |
+| `*_IP` series | Per-container IPs (HSS, MME, SGW, SMF, UPF, PCRF, DNS, RTPENGINE, PYHSS, ICSCF, SCSCF, PCSCF, WEBUI, MONGO, MYSQL, SRS_ENB, SMSC, ENTITLEMENT_SERVER) |
 | `UE_IPV4_INTERNET` / `UE_IPV4_IMS` | UE APN subnets |
 | `MAX_NUM_UE` | Max number of UEs |
 
@@ -115,6 +116,16 @@ sudo $(which uv) run poe setup-host
 sudo systemctl restart volte-testbed-routes
 ```
 
+**SMS not delivered (sending UE shows send failure)** — SMSC forwarded MT to I-CSCF but recipient is not registered (returns 480). Confirm both UEs are attached first:
+```bash
+docker exec pcscf kamctl ul show
+```
+Or check SMSC logs directly:
+```bash
+docker logs smsc 2>&1 | tail -30
+```
+If SMSC returned `415 Unsupported Media Type`, the UE sent `text/plain` instead of `application/vnd.3gpp.sms` — UE IMS/SMS config issue.
+
 ## Credits / Based On
 
 This testbed is based on the structure of [herlesupreeth/docker_open5gs](https://github.com/herlesupreeth/docker_open5gs) and integrates the following open-source components in Docker:
@@ -127,6 +138,7 @@ This testbed is based on the structure of [herlesupreeth/docker_open5gs](https:/
 | IMS HSS | [PyHSS](https://github.com/nickvsnetworking/pyhss) | tag `1.0.2` |
 | SDR abstraction | [SoapySDR](https://github.com/pothosware/SoapySDR) | `soapy-sdr-0.8.1` |
 | Media relay | rtpengine | See `infrastructure/rtpengine/Dockerfile` |
+| SMS (MO+MT) | self-implementation (Python + smsutil) | `infrastructure/smsc/` |
 
 Base OS image: Ubuntu 22.04 (jammy)
 
@@ -138,7 +150,7 @@ volte_testbed/
 ├── .env.example                # Environment variable template
 ├── setup_host.sh               # Host OS setup automation
 ├── pyproject.toml              # poe task definitions
-├── infrastructure/             # Container configs (mme, hss, srsenb, pcscf, ...)
+├── infrastructure/             # Container configs (mme, hss, srsenb, pcscf, smsc, ...)
 └── scripts/
     ├── provision_subscribers.py
     └── add_ue_routes.py

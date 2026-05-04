@@ -376,6 +376,23 @@ services:
       default:
         ipv4_address: ${PCSCF_IP}
 
+  smsc:
+    build: ./infrastructure/smsc
+    image: docker_smsc
+    container_name: smsc
+    dns: ${DNS_IP}
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      default:
+        ipv4_address: ${SMSC_IP}
+    depends_on:
+      - dns
+      - icscf
+    restart: on-failure
+
 networks:
   default:
     name: docker_open5gs_default
