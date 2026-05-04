@@ -22,10 +22,10 @@ def test_parse_sip_message_basic():
 
     assert msg.method == "MESSAGE"
     assert msg.request_uri == "sip:111111@ims.mnc001.mcc001.3gppnetwork.org"
-    assert msg.headers["call-id"] == "call-1234@scscf"
-    assert msg.headers["cseq"] == "1 MESSAGE"
-    assert msg.headers["content-type"] == "application/vnd.3gpp.sms"
-    assert "222222" in msg.headers["from"]
+    assert msg.header("call-id") == "call-1234@scscf"
+    assert msg.header("cseq") == "1 MESSAGE"
+    assert msg.header("content-type") == "application/vnd.3gpp.sms"
+    assert "222222" in msg.header("from")
     assert msg.body[:2] == b"\x00\x00"  # RP-DATA MTI=0
 
 
@@ -72,3 +72,44 @@ def test_build_mt_message():
     assert b"Content-Type: application/vnd.3gpp.sms\r\n" in msg_bytes
     assert f"Content-Length: {len(body)}\r\n".encode() in msg_bytes
     assert msg_bytes.endswith(b"\r\n\r\n" + body)
+
+
+def test_parse_sip_message_preserves_via_stack():
+    """Multi-Via headers (P-CSCF stacked on UE) must all be retained."""
+    raw = (
+        b"MESSAGE sip:smsc.ims.mnc001.mcc001.3gppnetwork.org SIP/2.0\r\n"
+        b"Via: SIP/2.0/UDP 172.22.0.20:5060;branch=z9hG4bK-scscf\r\n"
+        b"Via: SIP/2.0/UDP 172.22.0.21:5060;branch=z9hG4bK-pcscf\r\n"
+        b"Via: SIP/2.0/UDP 10.20.20.2:5060;branch=z9hG4bK-ue\r\n"
+        b"From: <sip:222222@ims.mnc001.mcc001.3gppnetwork.org>;tag=t1\r\n"
+        b"To: <sip:111111@ims.mnc001.mcc001.3gppnetwork.org>\r\n"
+        b"Call-ID: stacked-via-test\r\n"
+        b"CSeq: 1 MESSAGE\r\n"
+        b"Content-Length: 0\r\n"
+        b"\r\n"
+    )
+    msg = parse_sip_message(raw)
+    assert len(msg.headers["via"]) == 3
+    assert "172.22.0.20" in msg.headers["via"][0]
+    assert "172.22.0.21" in msg.headers["via"][1]
+    assert "10.20.20.2" in msg.headers["via"][2]
+
+
+def test_build_sip_response_echoes_full_via_stack():
+    """Response must echo every Via from the request."""
+    raw = (
+        b"MESSAGE sip:smsc.ims.mnc001.mcc001.3gppnetwork.org SIP/2.0\r\n"
+        b"Via: SIP/2.0/UDP 172.22.0.20:5060;branch=z9hG4bK-scscf\r\n"
+        b"Via: SIP/2.0/UDP 172.22.0.21:5060;branch=z9hG4bK-pcscf\r\n"
+        b"From: <sip:222222@ims.mnc001.mcc001.3gppnetwork.org>;tag=t1\r\n"
+        b"To: <sip:111111@ims.mnc001.mcc001.3gppnetwork.org>\r\n"
+        b"Call-ID: stacked-via-test\r\n"
+        b"CSeq: 1 MESSAGE\r\n"
+        b"Content-Length: 0\r\n"
+        b"\r\n"
+    )
+    request = parse_sip_message(raw)
+    response = build_sip_response(request, 200, "OK")
+    # Both Vias must appear in the response
+    assert response.count(b"Via: SIP/2.0/UDP 172.22.0.20:5060") == 1
+    assert response.count(b"Via: SIP/2.0/UDP 172.22.0.21:5060") == 1

@@ -9,12 +9,17 @@ from dataclasses import dataclass, field
 
 @dataclass
 class SipMessage:
-    method: str                          # e.g. "MESSAGE" — empty for responses
-    request_uri: str                     # empty for responses
-    status_code: int = 0                 # nonzero for responses
+    method: str                               # e.g. "MESSAGE" — empty for responses
+    request_uri: str                          # empty for responses
+    status_code: int = 0                      # nonzero for responses
     reason_phrase: str = ""
-    headers: dict[str, str] = field(default_factory=dict)  # lowercase keys
+    headers: dict[str, list[str]] = field(default_factory=dict)  # lowercase keys → list of values
     body: bytes = b""
+
+    def header(self, name: str, default: str = "") -> str:
+        """First value for a header (lowercase name lookup), or default if absent."""
+        values = self.headers.get(name.lower(), [])
+        return values[0] if values else default
 
 
 _URI_MSISDN_RE = re.compile(r"sip:(\+?\d+)@", re.IGNORECASE)
@@ -56,7 +61,7 @@ def parse_sip_message(data: bytes) -> SipMessage:
         if ":" not in decoded:
             continue
         name, value = decoded.split(":", 1)
-        msg.headers[name.strip().lower()] = value.strip()
+        msg.headers.setdefault(name.strip().lower(), []).append(value.strip())
 
     return msg
 
@@ -69,14 +74,14 @@ def build_sip_response(request: SipMessage, status_code: int, reason: str) -> by
     """Build a SIP response that echoes the routing-relevant request headers."""
     lines = [f"SIP/2.0 {status_code} {reason}".encode()]
     for header_name in _RESPONSE_HEADERS_TO_COPY:
-        if header_name in request.headers:
+        for value in request.headers.get(header_name, []):
             # Capitalize header name in response (cosmetic)
             display_name = "-".join(part.capitalize() for part in header_name.split("-"))
             if header_name == "call-id":
                 display_name = "Call-ID"
             elif header_name == "cseq":
                 display_name = "CSeq"
-            lines.append(f"{display_name}: {request.headers[header_name]}".encode())
+            lines.append(f"{display_name}: {value}".encode())
     lines.append(b"Content-Length: 0")
     return b"\r\n".join(lines) + b"\r\n\r\n"
 

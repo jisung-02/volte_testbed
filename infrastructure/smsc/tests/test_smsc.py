@@ -41,7 +41,7 @@ def test_handler_produces_mt_for_valid_mo():
     assert sent[0][1] == ("172.22.0.19", 5060)
     mt = parse_sip_message(sent[0][0])
     assert "111111" in mt.request_uri
-    assert "222222" in mt.headers["from"]
+    assert "222222" in mt.header("from")
 
 
 def test_handler_rejects_non_message_with_405():
@@ -89,16 +89,16 @@ def test_mo_response_deferred_until_mt_response():
 
     # Capture the MT call-id from outgoing packet
     mt_msg = parse_sip_message(sent[0][0])
-    mt_call_id = mt_msg.headers["call-id"]
+    mt_call_id = mt_msg.header("call-id")
 
     # Simulate MT 200 OK arriving from I-CSCF
     mt_response = (
         b"SIP/2.0 200 OK\r\n"
-        + f"Via: {mt_msg.headers['via']}\r\n".encode()
-        + f"From: {mt_msg.headers['from']}\r\n".encode()
-        + f"To: {mt_msg.headers['to']};tag=recipient-tag\r\n".encode()
+        + f"Via: {mt_msg.header('via')}\r\n".encode()
+        + f"From: {mt_msg.header('from')}\r\n".encode()
+        + f"To: {mt_msg.header('to')};tag=recipient-tag\r\n".encode()
         + f"Call-ID: {mt_call_id}\r\n".encode()
-        + f"CSeq: {mt_msg.headers['cseq']}\r\n".encode()
+        + f"CSeq: {mt_msg.header('cseq')}\r\n".encode()
         + b"Content-Length: 0\r\n\r\n"
     )
 
@@ -126,9 +126,9 @@ def test_mt_480_maps_to_mo_480():
 
     mt_response = (
         b"SIP/2.0 480 Temporarily Unavailable\r\n"
-        + f"Via: {mt_msg.headers['via']}\r\n".encode()
-        + f"Call-ID: {mt_msg.headers['call-id']}\r\n".encode()
-        + f"CSeq: {mt_msg.headers['cseq']}\r\n".encode()
+        + f"Via: {mt_msg.header('via')}\r\n".encode()
+        + f"Call-ID: {mt_msg.header('call-id')}\r\n".encode()
+        + f"CSeq: {mt_msg.header('cseq')}\r\n".encode()
         + b"Content-Length: 0\r\n\r\n"
     )
     handler.handle_packet(mt_response, ("172.22.0.19", 5060))
@@ -151,9 +151,9 @@ def test_mt_500_maps_to_mo_500():
 
     mt_response = (
         b"SIP/2.0 503 Service Unavailable\r\n"
-        + f"Via: {mt_msg.headers['via']}\r\n".encode()
-        + f"Call-ID: {mt_msg.headers['call-id']}\r\n".encode()
-        + f"CSeq: {mt_msg.headers['cseq']}\r\n".encode()
+        + f"Via: {mt_msg.header('via')}\r\n".encode()
+        + f"Call-ID: {mt_msg.header('call-id')}\r\n".encode()
+        + f"CSeq: {mt_msg.header('cseq')}\r\n".encode()
         + b"Content-Length: 0\r\n\r\n"
     )
     handler.handle_packet(mt_response, ("172.22.0.19", 5060))

@@ -126,6 +126,14 @@ docker logs smsc 2>&1 | tail -30
 ```
 If SMSC returned `415 Unsupported Media Type`, the UE sent `text/plain` instead of `application/vnd.3gpp.sms` — UE IMS/SMS config issue.
 
+**SMSC config changes not taking effect** — `default_ifc.xml` is loaded only once when the PyHSS container starts (`pyhss_init.sh:51`). To apply changes:
+```bash
+docker restart pyhss && docker restart scscf
+```
+S-CSCF must also be restarted so that the cached subscriber iFC is refreshed. Already-registered UEs may need to re-register (Re-REGISTER, or toggle airplane mode).
+
+**Korean/emoji SMS rejected by SMSC with 400** — This SMSC only supports DCS=0x00 (default 7-bit GSM). UCS-2 (DCS=0x08, required for Korean/emoji) raises `NotImplementedError` → 400. Use plain ASCII SMS for testing.
+
 ## Credits / Based On
 
 This testbed is based on the structure of [herlesupreeth/docker_open5gs](https://github.com/herlesupreeth/docker_open5gs) and integrates the following open-source components in Docker:

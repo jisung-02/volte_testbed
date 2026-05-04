@@ -92,21 +92,21 @@ class SmscHandler:
         self._handle_mo_message(msg, sender)
 
     def _handle_mo_message(self, msg: SipMessage, sender: tuple[str, int]) -> None:
-        content_type = msg.headers.get("content-type", "")
+        content_type = msg.header("content-type")
         media_type = content_type.split(";", 1)[0].strip().lower()
         if media_type != "application/vnd.3gpp.sms":
             self._send(build_sip_response(msg, 415, "Unsupported Media Type"), sender)
             return
 
         try:
-            sender_msisdn = extract_msisdn_from_uri(msg.headers.get("from", ""))
+            sender_msisdn = extract_msisdn_from_uri(msg.header("from"))
             recipient, mt_rp = swap_mo_to_mt(
                 mo_rp_data=msg.body,
                 sender_msisdn=sender_msisdn,
                 smsc_msisdn=self._smsc_msisdn,
             )
         except Exception as exc:
-            log.warning("MO TPDU decode failed (call-id=%s): %s", msg.headers.get("call-id"), exc, exc_info=True)
+            log.warning("MO TPDU decode failed (call-id=%s): %s", msg.header("call-id"), exc, exc_info=True)
             self._send(build_sip_response(msg, 400, "Bad Request"), sender)
             return
 
@@ -129,7 +129,7 @@ class SmscHandler:
         self._send(mt_bytes, self._icscf_addr)
 
     def _handle_mt_response(self, response: SipMessage) -> None:
-        call_id = response.headers.get("call-id", "")
+        call_id = response.header("call-id")
         in_flight = self._in_flight.pop(call_id, None)
         if in_flight is None:
             log.debug("late or unknown MT response %d for call-id=%s — dropped", response.status_code, call_id)
@@ -146,7 +146,7 @@ class SmscHandler:
         expired = [(cid, ent) for cid, ent in self._in_flight.items() if ent.expires_at <= now]
         for cid, ent in expired:
             del self._in_flight[cid]
-            log.warning("MT timeout for MO call-id=%s", ent.mo_request.headers.get("call-id"))
+            log.warning("MT timeout for MO call-id=%s", ent.mo_request.header("call-id"))
             self._send(
                 build_sip_response(ent.mo_request, 408, "Request Timeout"),
                 ent.mo_sender,

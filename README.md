@@ -126,6 +126,14 @@ docker logs smsc 2>&1 | tail -30
 ```
 SMSC 가 `415 Unsupported Media Type` 를 반환했다면 단말이 `application/vnd.3gpp.sms` 가 아닌 `text/plain` 으로 보낸 것 — 단말 IMS/SMS 설정 문제.
 
+**SMSC 변경사항이 적용 안 됨** — `default_ifc.xml` 수정은 PyHSS 컨테이너 시작 시점에 한 번만 로드된다 (`pyhss_init.sh:51`). 변경 후 적용:
+```bash
+docker restart pyhss && docker restart scscf
+```
+S-CSCF 도 같이 재시작해야 캐시된 가입자 iFC 가 갱신됨. 이미 등록된 UE 는 재등록 (Re-REGISTER, 또는 비행기모드 toggle) 필요할 수 있음.
+
+**한글/이모지 SMS 가 SMSC 에서 400 으로 떨어짐** — 본 SMSC 는 DCS=0x00 (default 7-bit GSM) 만 지원. UCS-2 (DCS=0x08, 한글/이모지) 는 `NotImplementedError` → 400. 영문 ASCII SMS 로 시험.
+
 ## 참조 및 출처
 
 이 testbed 는 [herlesupreeth/docker_open5gs](https://github.com/herlesupreeth/docker_open5gs) 의 구조를 기반으로, 다음 오픈소스 컴포넌트의 도커 구성을 통합한다:
