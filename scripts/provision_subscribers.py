@@ -8,6 +8,7 @@
 """
 
 import json
+import re
 import subprocess
 import sys
 import urllib.request
@@ -88,39 +89,60 @@ def upsert_pyhss(
     lookup_val: str,
     update_data: dict | None = None,
 ) -> tuple[int, dict]:
-    """PUT으로 생성 시도, 이미 존재하면 /imsi/ 엔드포인트로 조회 후 PATCH로 업데이트.
+    """Look up before writing; PyHSS 1.0.2 lists return arrays of records.
 
-    update_data: PATCH 시 사용할 데이터 (None이면 data 사용).
-                 sqn 등 리셋하면 안 되는 필드를 제외할 때 활용.
+    page_size=0 is the upstream API's unpaginated mode, suitable for this lab.
+    An empty update_data preserves an existing record unchanged.
     """
-    status, body = put_json(f"{base_url}/{resource}/", data)
-    if status in (200, 201):
-        try:
-            return status, json.loads(body)
-        except Exception:
-            return status, {}
+    status, body = get_json(f"{base_url.rstrip('/')}/{resource}/list?page=0&page_size=0")
+    try:
+        records = json.loads(body)
+    except (ValueError, TypeError):
+        records = None
+    if status != 200 or not isinstance(records, list) or any(not isinstance(r, dict) for r in records):
+        raise RuntimeError(f"PyHSS {resource} lookup failed (HTTP {status}); no write attempted")
+    matches = [r for r in records if r.get(lookup_key) == lookup_val]
+    if len(matches) > 1:
+        raise RuntimeError(f"PyHSS {resource} lookup is ambiguous; resolve duplicate records")
+    if matches:
+        record = matches[0]
+        rid = record.get(f"{resource}_id")
+        if type(rid) is not int or rid <= 0:
+            raise RuntimeError(f"PyHSS {resource} lookup returned no valid ID")
+        patch_data = data if update_data is None else update_data
+        if not patch_data:
+            return status, record
+        status, body = patch_json(f"{base_url.rstrip('/')}/{resource}/{rid}", patch_data)
+    else:
+        status, body = put_json(f"{base_url.rstrip('/')}/{resource}/", data)
+    try:
+        record = json.loads(body)
+    except (ValueError, TypeError):
+        record = None
+    rid = record.get(f"{resource}_id") if isinstance(record, dict) else None
+    if status not in (200, 201) or type(rid) is not int or rid <= 0:
+        raise RuntimeError(f"PyHSS {resource} write failed or returned no valid ID (HTTP {status})")
+    return status, record
 
-    # PUT 실패 시 /imsi/ 엔드포인트로 기존 레코드 조회 후 PATCH
-    get_status, get_body = get_json(f"{base_url}/{resource}/imsi/{lookup_val}")
-    if get_status == 200:
-        try:
-            record = json.loads(get_body)
-            if isinstance(record, dict) and "Result" not in record:
-                rid = record.get(f"{resource}_id") or record.get("id")
-                if rid:
-                    patch_data = update_data if update_data is not None else data
-                    patch_status, patch_body = patch_json(f"{base_url}/{resource}/{rid}", patch_data)
-                    try:
-                        return patch_status, json.loads(patch_body)
-                    except Exception:
-                        return patch_status, {}
-        except Exception:
-            pass
 
-    return status, {}
+def validate_subscribers(subscribers: list[dict]) -> None:
+    if not subscribers:
+        raise ValueError("No subscribers configured")
+    seen = set()
+    for index, ue in enumerate(subscribers, 1):
+        for field, pattern in (("imsi", r"[0-9]{5,15}"), ("ki", r"[0-9a-fA-F]{32}"),
+                               ("opc", r"[0-9a-fA-F]{32}"), ("amf", r"[0-9a-fA-F]{4}"),
+                               ("msisdn", r"[0-9]{1,15}")):
+            value = ue.get(field, "8000" if field == "amf" else "")
+            if not isinstance(value, str) or not re.fullmatch(pattern, value):
+                raise ValueError(f"Subscriber {index}: invalid {field}")
+        if ue["imsi"] in seen:
+            raise ValueError(f"Subscriber {index}: duplicate IMSI")
+        seen.add(ue["imsi"])
 
 
 def provision_open5gs(env: dict, subscribers: list[dict]) -> None:
+    validate_subscribers(subscribers)
     print("[1/2] Open5GS HSS (MongoDB)")
     print("-" * 40)
 
@@ -130,12 +152,13 @@ def provision_open5gs(env: dict, subscribers: list[dict]) -> None:
         opc = ue["opc"]
         print(f"  Adding IMSI: {imsi}")
 
-        # open5gs-dbctl은 KI/OPC를 바꿔서 넣는 버그가 있으므로 mongosh로 직접 upsert
+        # Explicit field updates preserve the existing authentication SQN.
         mongo_script = f"""
 const imsi = "{imsi}";
 const ki = "{ki}";
 const opc = "{opc}";
 const msisdn = "{ue['msisdn']}";
+const amf = "{ue.get('amf', '8000')}";
 
 const defaultSlice = [{{
   sst: 1,
@@ -165,9 +188,6 @@ if (existing) {{
 
   if (!Array.isArray(slices[0].session)) slices[0].session = [];
 
-  // 손상된 ue 필드 제거
-  slices[0].session = slices[0].session.map(s => {{ if (s && s.ue) delete s.ue; return s; }});
-
   // IMS APN 없으면 추가
   if (!slices[0].session.some(s => s && s.name === "ims")) {{
     slices[0].session.push({{
@@ -182,7 +202,7 @@ if (existing) {{
   db.subscribers.updateOne({{imsi}}, {{$set: {{
     "security.k": ki,
     "security.opc": opc,
-    "security.amf": "8000",
+    "security.amf": amf,
     "msisdn": [msisdn],
     "slice": slices
   }}}});
@@ -192,7 +212,7 @@ if (existing) {{
   db.subscribers.insertOne({{
     imsi: imsi,
     msisdn: [msisdn],
-    security: {{k: ki, opc: opc, amf: "8000", sqn: {{low: 0, high: 0, unsigned: false}}}},
+    security: {{k: ki, opc: opc, amf: amf, sqn: {{low: 0, high: 0, unsigned: false}}}},
     ambr: {{uplink: {{value: 1, unit: 3}}, downlink: {{value: 1, unit: 3}}}},
     slice: defaultSlice,
     access_restriction_data: 32,
@@ -204,21 +224,24 @@ if (existing) {{
   print("inserted");
 }}
 """
-        docker_exec("mongo", "mongosh", "open5gs", "--quiet", "--eval", mongo_script)
+        rc, _, _ = docker_exec("mongo", "mongosh", "open5gs", "--quiet", "--eval", mongo_script)
+        if rc != 0:
+            raise RuntimeError("Open5GS MongoDB write failed; provisioning stopped")
 
     print("  Done\n")
 
 
 def provision_pyhss(env: dict, subscribers: list[dict]) -> None:
+    validate_subscribers(subscribers)
     print("[2/2] PyHSS (IMS)")
     print("-" * 40)
 
     base_url = env.get("PYHSS_URL", "http://localhost:8080")
 
-    # APN 생성 (이미 있으면 무시)
+    # Keep existing APN policy settings; use database-assigned IDs.
     print("  Creating APNs...")
-    upsert_pyhss(base_url, "apn", {"apn": "internet", "apn_ambr_dl": 0, "apn_ambr_ul": 0}, "apn", "internet")
-    upsert_pyhss(base_url, "apn", {"apn": "ims", "apn_ambr_dl": 0, "apn_ambr_ul": 0}, "apn", "ims")
+    _, internet = upsert_pyhss(base_url, "apn", {"apn": "internet", "apn_ambr_dl": 0, "apn_ambr_ul": 0}, "apn", "internet", update_data={})
+    _, ims = upsert_pyhss(base_url, "apn", {"apn": "ims", "apn_ambr_dl": 0, "apn_ambr_ul": 0}, "apn", "ims", update_data={})
     print("    APNs ready (internet, ims)")
 
     mnc = env.get("MNC", "01").zfill(3)
@@ -226,7 +249,7 @@ def provision_pyhss(env: dict, subscribers: list[dict]) -> None:
     ims_domain = f"ims.mnc{mnc}.mcc{mcc}.3gppnetwork.org"
     scscf_uri = f"sip:scscf.{ims_domain}:6060"
 
-    for i, ue in enumerate(subscribers, start=1):
+    for ue in subscribers:
         imsi = ue["imsi"]
         ki = ue["ki"]
         opc = ue["opc"]
@@ -236,26 +259,29 @@ def provision_pyhss(env: dict, subscribers: list[dict]) -> None:
         # AUC 생성 또는 업데이트 (업데이트 시 sqn 리셋 금지 — IMS 인증 깨짐)
         _, auc = upsert_pyhss(
             base_url, "auc",
-            {"ki": ki, "opc": opc, "amf": "8000", "sqn": 0, "imsi": imsi},
+            {"ki": ki, "opc": opc, "amf": ue.get("amf", "8000"), "sqn": 0, "imsi": imsi},
             "imsi", imsi,
-            update_data={"ki": ki, "opc": opc, "amf": "8000", "imsi": imsi},
+            update_data={"ki": ki, "opc": opc, "amf": ue.get("amf", "8000"), "imsi": imsi},
         )
-        auc_id = auc.get("auc_id", i)
+        auc_id = auc["auc_id"]
 
         # Subscriber 생성 또는 업데이트
-        _, sub = upsert_pyhss(
+        upsert_pyhss(
             base_url, "subscriber",
             {
                 "imsi": imsi,
                 "enabled": True,
                 "auc_id": auc_id,
-                "default_apn": 1,
-                "apn_list": "1,2",
+                "default_apn": internet["apn_id"],
+                "apn_list": f"{internet['apn_id']},{ims['apn_id']}",
                 "msisdn": msisdn,
                 "ue_ambr_dl": 0,
                 "ue_ambr_ul": 0,
             },
             "imsi", imsi,
+            update_data={"imsi": imsi, "auc_id": auc_id, "msisdn": msisdn,
+                         "default_apn": internet["apn_id"],
+                         "apn_list": f"{internet['apn_id']},{ims['apn_id']}"},
         )
 
         # IMS Subscriber 생성 또는 업데이트
@@ -266,7 +292,6 @@ def provision_pyhss(env: dict, subscribers: list[dict]) -> None:
             {
                 "imsi": imsi,
                 "msisdn": msisdn,
-                "sh_profile": "string",
                 "scscf_peer": scscf_peer,
                 "msisdn_list": f"[{msisdn}]",
                 "ifc_path": "default_ifc.xml",
@@ -274,35 +299,25 @@ def provision_pyhss(env: dict, subscribers: list[dict]) -> None:
                 "scscf_realm": ims_domain,
             },
             "imsi", imsi,
+            update_data={"imsi": imsi, "msisdn": msisdn, "msisdn_list": f"[{msisdn}]"},
         )
 
     print("  Done\n")
 
 
 def apply_pyhss_ifc_template(project_root: Path) -> None:
-    """Ensure the committed iFC template is active in the pyhss container.
-
-    The template is bind-mounted, so the repo file is the source of truth.
-    Restart pyhss so any cached iFC rendering is discarded and the next MAR
-    re-renders from disk. Reproducibility contract: after `poe provision`,
-    S-CSCF iFC matches `infrastructure/pyhss/default_ifc.xml` exactly.
-    """
+    """Verify the source mount; activation remains an explicit operator action."""
     repo_ifc = project_root / "infrastructure" / "pyhss" / "default_ifc.xml"
-    if not repo_ifc.exists():
-        print(f"  Skip: {repo_ifc} missing")
-        return
-
+    if not repo_ifc.is_file():
+        raise RuntimeError("Repository iFC template is missing")
     rc, out, _ = docker_exec("pyhss", "cat", "/mnt/pyhss/default_ifc.xml")
     if rc != 0:
-        print("  Skip: pyhss container not running")
-        return
-
+        raise RuntimeError("Cannot read PyHSS iFC source mount")
     if out != repo_ifc.read_text():
-        print("  WARNING: repo iFC differs from pyhss bind mount — check rsync to server")
-
-    print("Restarting pyhss to reload iFC template...")
-    subprocess.run(["docker", "restart", "pyhss"], check=False)
-    print("  Done — UE must re-REGISTER for new iFC to apply\n")
+        raise RuntimeError("PyHSS iFC source mount differs from repository; sync the template first")
+    print("  iFC source mount verified; provisioning does not activate template changes.")
+    print("  After an iFC edit: docker restart pyhss && docker restart scscf")
+    print("  Then re-REGISTER the UE to apply the new iFC.\n")
 
 
 def main() -> None:
@@ -325,12 +340,15 @@ def main() -> None:
     for idx in range(1, 10):
         imsi = env.get(f"UE{idx}_IMSI", "")
         if not imsi:
-            break
+            if any(env.get(f"UE{idx}_{field}", "") for field in ("KI", "OPC", "MSISDN")):
+                raise ValueError(f"UE{idx}: IMSI missing")
+            continue
         subscribers.append(
             {
                 "imsi": imsi,
                 "ki": env.get(f"UE{idx}_KI", ""),
                 "opc": env.get(f"UE{idx}_OPC", ""),
+                "amf": env.get(f"UE{idx}_AMF", "8000"),
                 "msisdn": env.get(f"UE{idx}_MSISDN", ""),
             }
         )
@@ -362,4 +380,11 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (ValueError, RuntimeError) as error:
+        print(f"Error: {error}. Earlier writes may have completed; fix the problem and rerun.", file=sys.stderr)
+        sys.exit(1)
+    except OSError:
+        print("Error: cannot access a required file or Docker executable; check local setup.", file=sys.stderr)
+        sys.exit(1)

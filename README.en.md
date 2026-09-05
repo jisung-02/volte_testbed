@@ -1,165 +1,91 @@
 # volte_testbed
 
-VoLTE testbed infrastructure — an end-to-end 4G/VoLTE testing environment that bundles EPC, RAN, and IMS into a single Docker stack.
+A 4G/VoLTE testbed running **EPC, IMS and an SDR eNB on one PC**, based on [docker_open5gs](https://github.com/herlesupreeth/docker_open5gs). It packages the single-PC configuration with subscriber provisioning, host setup and lifecycle commands. Subsequent commits added a Python SMSC and preservation of the complete SIP Via stack.
 
-Korean: [README.md](./README.md)
+The maintainer reports successful **LTE attach, IMS registration, voice calls and SMS on real devices** with the existing baseline. That is separate from automated verification of new changes; see the [validation record](docs/testing.md).
 
-## Prerequisites
+[Korean](README.md)
 
-### Hardware
-- SDR: USRP B210 (current default). BladeRF / LimeSDR also supported — adjust `device_name` / `device_args` in `infrastructure/srsenb/enb.conf`.
-- USB: For SDR connection. `setup-host` installs the udev rules automatically.
+## Documentation
 
-### Software (Docker + uv on the host)
+The detailed operational reference is maintained in Korean:
 
-#### macOS
-```bash
-brew install --cask docker   # Docker Desktop
-brew install uv
-```
+| Document | Contents |
+|---|---|
+| [Architecture and history](docs/architecture-and-history.md) | Network diagram, addresses/ports, single-PC assumptions, imported baseline and subsequent commits |
+| [Operations](docs/operations.md) | Setup, configuration, startup/restart, provisioning, iFC activation, routes and troubleshooting |
+| [Testing and limitations](docs/testing.md) | Regression checks, Linux container checks, hardware acceptance matrix and SMSC limitations |
 
-#### Ubuntu
-```bash
-# Docker
-sudo apt update
-sudo apt install -y docker.io docker-compose-plugin
+## Requirements
 
-# uv
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
+- Hardware operation: Ubuntu 22.04/24.04, Docker Engine, Compose v2+, uv, SCTP/TUN, systemd and USB access.
+- Default SDR: USRP B210. Other SDR dependency/configuration examples are present; they are not additional hardware validation claims.
+- Local development: Python 3.12+. Python regression tests can also run on macOS.
+- One stack per host: explicit container, network and volume names plus published ports prevent running multiple copies concurrently. Changing the Compose project name alone does not isolate them.
 
-## Quick Start
+## Quick start
+
+Run from the repository root on the Linux experiment host. Do not overwrite an existing `.env`.
 
 ```bash
-# First time only: create the env file
 cp .env.example .env
+# Set host addresses and the test SIM's IMSI/KI/OPC/AMF/MSISDN.
+uv sync --locked
+uv run poe test
 
-# Install poethepoet (no build step thanks to package = false)
-uv sync
-
-# One-time host setup (root required)
-sudo uv run poe setup-host
-
-# Build base images
+# This task invokes sudo internally.
+uv run poe setup-host
 uv run poe epc-build
-
-# Build srsenb image (compiles srsRAN_4G — takes 5–15 min)
 uv run poe enb-build
-
-# Start 4G EPC + IMS containers
 uv run poe epc-run
-
-# Verify all containers are Up
 uv run poe epc-status
-
-# Start srsenb (USRP B210)
-uv run poe enb-run
-
-# Provision test subscribers
-uv run poe provision
 ```
 
-> A single `setup-host` run handles host sysctl and UE-subnet route persistence (via systemd) at the same time. No separate network-setup task is needed.
+A running container is not necessarily ready. Check initialization logs and API readiness. Host route setup may fail until the Docker bridge exists; inspect the bridge and rerun route setup after EPC startup.
 
-## Available Tasks
-
-Run `uv run poe` to list all 12 tasks.
-
-| Category | task | sudo |
-|---|---|---|
-| eNB | `enb-build`, `enb-run`, `enb-stop`, `enb-logs` | — |
-| EPC | `epc-build`, `epc-run`, `epc-stop`, `epc-status`, `epc-logs` | — |
-| Subscribers | `provision` | — |
-| SMSC | `smsc-test` | — |
-| Host setup | `setup-host` | ✅ |
-
-## Environment Variables (`.env`)
-
-After `cp .env.example .env`, adjust to your environment.
-
-### PyHSS REST API
-
-| Variable | Meaning |
-|---|---|
-| `PYHSS_URL` | PyHSS REST API endpoint (used by the `provision` task to register subscribers) |
-
-### Infrastructure (Docker EPC/IMS)
-
-| Variable | Meaning |
-|---|---|
-| `MCC`, `MNC`, `TAC` | PLMN ID (`001` / `01` / `1`) |
-| `TEST_NETWORK` | Docker bridge subnet (`172.22.0.0/24`) |
-| `DOCKER_HOST_IP` | Docker host IP |
-| `*_IP` series | Per-container IPs (HSS, MME, SGW, SMF, UPF, PCRF, DNS, RTPENGINE, PYHSS, ICSCF, SCSCF, PCSCF, WEBUI, MONGO, MYSQL, SRS_ENB, SMSC, ENTITLEMENT_SERVER) |
-| `UE_IPV4_INTERNET` / `UE_IPV4_IMS` | UE APN subnets |
-| `MAX_NUM_UE` | Max number of UEs |
-
-### Test Subscribers
-
-`UE{N}_IMSI`, `UE{N}_KI`, `UE{N}_OPC`, `UE{N}_AMF`, `UE{N}_MSISDN` (N=1..9). The `provision` task stops at the first empty IMSI — defines as many subscribers as you specify within 1..9.
-
-## Troubleshooting
-
-**`sudo: uv: command not found`** — `uv` is installed under the user's PATH (`~/.local/bin`) and sudo cannot find it.
 ```bash
-sudo -E env "PATH=$PATH" uv run poe setup-host
-# Or absolute path
-sudo $(which uv) run poe setup-host
-```
-
-**`docker: permission denied`** — User is not in the docker group. After `setup-host` prints the notice, run `sudo usermod -aG docker $USER` and log out / log back in.
-
-**Container name / network conflict** — If another docker compose stack on the same host uses the same container names (`hss`, `mme`, ..., `pcscf`) or the `docker_open5gs_default` network, the second start fails. Run only one stack at a time.
-
-**UE subnets (`10.10.10.0/24` / `10.20.20.0/24`) unreachable** — `epc-stop` (= `docker compose down`) destroys the docker bridge, which removes the UPF (`172.22.0.8`) next-hop and purges the static routes. After restarting with `epc-run`, re-add the routes:
-```bash
+docker compose logs --tail=100 mysql pyhss hss mme pcscf icscf scscf
+curl --fail --silent --show-error 'http://localhost:8080/apn/list?page=0&page_size=1'
 sudo systemctl restart volte-testbed-routes
+uv run poe provision
+
+# Starts the real SDR eNodeB.
+uv run poe enb-run
+uv run poe enb-logs
 ```
 
-**SMS not delivered (sending UE shows send failure)** — SMSC forwarded MT to I-CSCF but recipient is not registered (returns 480). Confirm both UEs are attached first:
-```bash
-docker exec pcscf kamctl ul show
-```
-Or check SMSC logs directly:
-```bash
-docker logs smsc 2>&1 | tail -30
-```
-If SMSC returned `415 Unsupported Media Type`, the UE sent `text/plain` instead of `application/vnd.3gpp.sms` — UE IMS/SMS config issue.
+Then verify LTE attach, IMS registration, bidirectional voice and SMS. Provisioning success only confirms management operations, not end-to-end service.
 
-**SMSC config changes not taking effect** — `default_ifc.xml` is loaded only once when the PyHSS container starts (`pyhss_init.sh:51`). To apply changes:
-```bash
-docker restart pyhss && docker restart scscf
-```
-S-CSCF must also be restarted so that the cached subscriber iFC is refreshed. Already-registered UEs may need to re-register (Re-REGISTER, or toggle airplane mode).
+## Commands
 
-**Korean/emoji SMS rejected by SMSC with 400** — This SMSC only supports DCS=0x00 (default 7-bit GSM). UCS-2 (DCS=0x08, required for Korean/emoji) raises `NotImplementedError` → 400. Use plain ASCII SMS for testing.
+| Operation | Command |
+|---|---|
+| List tasks | `uv run poe` |
+| Build EPC/IMS | `uv run poe epc-build` |
+| Start/status/logs | `uv run poe epc-run`, `epc-status`, `epc-logs` |
+| Build/start/log eNB | `uv run poe enb-build`, `enb-run`, `enb-logs` |
+| Provision subscribers | `uv run poe provision` |
+| Local regression checks | `uv run poe test` |
+| SMSC checks only | `uv run poe smsc-test` |
+| Shutdown | `uv run poe enb-stop`, then `uv run poe epc-stop` |
+| Host status | `sudo ./setup_host.sh --check` |
 
-## Credits / Based On
+The eNB is a separate `docker run` container on the same bridge. Stop it before Compose teardown. Named database volumes are retained; restore/check host UE routes after bringing the bridge back.
 
-This testbed is based on the structure of [herlesupreeth/docker_open5gs](https://github.com/herlesupreeth/docker_open5gs) and integrates the following open-source components in Docker:
+## Configuration and behavior
 
-| Component | Project | Version/Tag |
-|---|---|---|
-| 4G EPC | [Open5GS](https://github.com/open5gs/open5gs) | commit `47d0062c` |
-| IMS (P/I/S-CSCF) | [Kamailio](https://github.com/kamailio/kamailio) | commit `6ce33529` |
-| eNodeB (SDR) | [srsRAN_4G](https://github.com/srsran/srsRAN_4G) | `release_23_11` |
-| IMS HSS | [PyHSS](https://github.com/nickvsnetworking/pyhss) | tag `1.0.2` |
-| SDR abstraction | [SoapySDR](https://github.com/pothosware/SoapySDR) | `soapy-sdr-0.8.1` |
-| Media relay | rtpengine | See `infrastructure/rtpengine/Dockerfile` |
-| SMS (MO+MT) | self-implementation (Python + smsutil) | `infrastructure/smsc/` |
+Use unquoted `KEY=value` entries in `.env`; the provisioning parser does not expand shell variables or remove inline comments. UE slots 1–9 may have gaps. AMF defaults to `8000`. KI/OPC must each contain 32 hex characters; AMF must contain four. Use numeric IMSI and MSISDN values.
 
-Base OS image: Ubuntu 22.04 (jammy)
+Provisioning stops on failed writes, invalid responses or ambiguous records and uses actual database APN/AUC IDs. Previous writes may remain: correct the problem and rerun, without resetting SQN or deleting volumes. Existing policy/custom iFC state is preserved as described in the operations guide. Cross-database rollback and concurrent provisioning are not supported.
 
-## Project Layout
+Provisioning verifies the mounted iFC **source**, but no longer restarts PyHSS automatically. After editing `default_ifc.xml`, restart PyHSS, wait for it to be ready, restart S-CSCF, then re-register the UE. The startup script copies the mounted template into the runtime location.
 
-```
-volte_testbed/
-├── docker-compose.yml          # EPC + IMS service definitions
-├── .env.example                # Environment variable template
-├── setup_host.sh               # Host OS setup automation
-├── pyproject.toml              # poe task definitions
-├── infrastructure/             # Container configs (mme, hss, srsenb, pcscf, smsc, ...)
-└── scripts/
-    ├── provision_subscribers.py
-    └── add_ue_routes.py
-```
+SMSC code is copied into its image: rebuild and recreate `smsc` after code changes. SIP 1xx responses now keep delivery pending; duplicate MO transactions are suppressed while pending and receive the cached final response for 32 seconds after completion. The cache is in memory and does not survive restart. This is a limited GSM 7-bit implementation; UCS-2/Korean/emoji and a complete commercial SMSC are outside its scope.
+
+eNB configuration is mounted read-only and copied to `/tmp/srsenb.*` inside the container before rendering. The runtime directory holds `enb.conf` and its companion files, leaving experiment inputs unchanged.
+
+Some IMS domains and host routes remain hard-coded to the default PLMN/subnets. `.env` changes alone do not reconfigure every component. See the detailed configuration boundaries before changing address plans.
+
+## Credits
+
+Based on [herlesupreeth/docker_open5gs](https://github.com/herlesupreeth/docker_open5gs), integrating Open5GS, Kamailio, PyHSS, srsRAN_4G, SoapySDR and rtpengine. Pinned versions, unpinned build inputs and source history are recorded in [architecture and history](docs/architecture-and-history.md). Existing copyright and license notices in imported files are retained.

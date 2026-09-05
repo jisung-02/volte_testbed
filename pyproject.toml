@@ -39,8 +39,8 @@ docker run -d \
   --ip "$SRS_ENB_IP" \
   --env-file .env \
   -e COMPONENT_NAME=enb \
-  -v "$(pwd)/infrastructure/srsenb:/etc/srsran" \
-  -v "$(pwd)/infrastructure/srslte:/mnt/srslte" \
+  -v "$(pwd)/infrastructure/srsenb:/etc/srsran:ro" \
+  -v "$(pwd)/infrastructure/srslte:/mnt/srslte:ro" \
   -v /dev/bus/usb:/dev/bus/usb \
   docker_srslte:latest
 echo "srsenb started. Run 'poe enb-logs' to tail logs."
@@ -77,3 +77,7 @@ cmd = "sudo ./setup_host.sh --all"
 [tool.poe.tasks.smsc-test]
 help = "Run SMSC unit tests"
 cmd = "pytest infrastructure/smsc/tests -v"
+
+[tool.poe.tasks.test]
+help = "Run local regression tests (no SDR or live databases)"
+cmd = "python -m pytest infrastructure/smsc/tests tests -q"

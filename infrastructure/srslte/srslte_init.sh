@@ -64,12 +64,18 @@ case $COMPONENT_NAME in
             CONFIG_FILE="/root/.config/srsran/enb.conf"
         fi
 
-        # 환경 변수로 설정 파일 업데이트
+        # Keep bind-mounted experiment inputs intact; resolve companion files here.
+        RUNTIME_DIR=$(mktemp -d /tmp/srsenb.XXXXXX)
+        cp -a "$(dirname "$CONFIG_FILE")/." "$RUNTIME_DIR/"
+        CONFIG_FILE="$RUNTIME_DIR/enb.conf"
+        cd "$RUNTIME_DIR"
+
+        # 환경 변수로 runtime 복사본 업데이트
         update_config "$CONFIG_FILE"
-        update_rr_config "/etc/srsran/rr.conf"
+        update_rr_config "$RUNTIME_DIR/rr.conf"
 
         echo "Config file: ${CONFIG_FILE}"
-        exec srsenb ${CONFIG_FILE} "$@"
+        exec srsenb "$CONFIG_FILE" "$@"
         ;;
 
     *)

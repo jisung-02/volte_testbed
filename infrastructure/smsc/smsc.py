@@ -1,22 +1,7 @@
-"""SMSC main: asyncio UDP listener + MO/MT handler.
+"""UDP SMSC with pending MT correlation and short-lived MO response replay.
 
-This file owns the SmscHandler class (pure logic, testable without a real socket)
-and the asyncio app entrypoint that wires the handler to a real UDP socket.
-
-Import strategy
----------------
-``from sip import ...`` and ``from tpdu import ...`` use bare module names (no
-package prefix) so that the file works when run directly inside the Docker
-container::
-
-    # Dockerfile: CMD ["python", "smsc.py"]
-    # /app/ contains smsc.py, sip.py, tpdu.py flat — bare imports resolve fine.
-
-For pytest, ``volte_testbed/infrastructure/smsc/tests/conftest.py`` inserts
-``infrastructure/smsc/`` into sys.path before collection, so the bare names
-resolve to the same physical files.  Tests themselves still use
-``from infrastructure.smsc.smsc import SmscHandler`` (package-style), which is
-fine because Python treats module identity by sys.path lookup, not file path.
+Bare imports match the Docker image's flat /app layout; tests add this directory
+to sys.path. Protocol scope and limitations are recorded in docs/testing.md.
 """
 import asyncio
 import logging
@@ -36,14 +21,15 @@ SmscSendCallback = Callable[[bytes, tuple[str, int]], None]
 
 
 @dataclass
-class _InFlight:
+class _MoTransaction:
     mo_request: SipMessage
     mo_sender: tuple[str, int]
     expires_at: float
+    response: bytes | None = None
 
 
 def _map_mt_status_to_mo(mt_status: int) -> tuple[int, str]:
-    """Per spec Section 5: MT response → MO response."""
+    """Map final MT status to the testbed's MO delivery result."""
     if 200 <= mt_status < 300:
         return 200, "OK"
     if mt_status in (404, 480, 486):
@@ -72,9 +58,11 @@ class SmscHandler:
         self._icscf_addr = icscf_addr
         self._send = send_callback
         self._ttl = in_flight_ttl_seconds
-        self._in_flight: dict[str, _InFlight] = {}  # keyed by MT Call-ID
+        self._in_flight: dict[str, _MoTransaction] = {}  # keyed by MT Call-ID
+        self._mo_transactions: dict[tuple, _MoTransaction] = {}
 
     def handle_packet(self, data: bytes, sender: tuple[str, int]) -> None:
+        self.sweep_expired()
         try:
             msg = parse_sip_message(data)
         except Exception as exc:
@@ -92,6 +80,24 @@ class SmscHandler:
         self._handle_mo_message(msg, sender)
 
     def _handle_mo_message(self, msg: SipMessage, sender: tuple[str, int]) -> None:
+        # Only the top Via identifies this hop's transaction; received/rport
+        # and lower proxy Vias do not create a new transaction.
+        top_via = msg.header("via").split(",", 1)[0]
+        sent_by, *parameters = top_via.split(";")
+        branch = ""
+        for parameter in parameters:
+            name, sep, value = parameter.partition("=")
+            if sep and name.strip().lower() == "branch":
+                branch = value.strip()
+                break
+        key = (sender, sent_by.strip(), branch or top_via,
+               msg.header("call-id"), msg.header("cseq"))
+        previous = self._mo_transactions.get(key)
+        if previous is not None:
+            if previous.response is not None:
+                self._send(previous.response, sender)
+            return
+
         content_type = msg.header("content-type")
         media_type = content_type.split(";", 1)[0].strip().lower()
         if media_type != "application/vnd.3gpp.sms":
@@ -121,36 +127,43 @@ class SmscHandler:
             body=mt_rp,
         )
 
-        self._in_flight[mt_call_id] = _InFlight(
+        transaction = _MoTransaction(
             mo_request=msg,
             mo_sender=sender,
             expires_at=time.monotonic() + self._ttl,
         )
+        self._in_flight[mt_call_id] = transaction
+        self._mo_transactions[key] = transaction
         self._send(mt_bytes, self._icscf_addr)
 
     def _handle_mt_response(self, response: SipMessage) -> None:
+        if 100 <= response.status_code < 200:
+            return
         call_id = response.header("call-id")
         in_flight = self._in_flight.pop(call_id, None)
         if in_flight is None:
             log.debug("late or unknown MT response %d for call-id=%s — dropped", response.status_code, call_id)
             return
         mo_status, mo_reason = _map_mt_status_to_mo(response.status_code)
-        self._send(
-            build_sip_response(in_flight.mo_request, mo_status, mo_reason),
-            in_flight.mo_sender,
-        )
+        self._complete_mo(in_flight, mo_status, mo_reason)
+
+    def _complete_mo(self, transaction: _MoTransaction, status: int, reason: str) -> None:
+        transaction.response = build_sip_response(transaction.mo_request, status, reason)
+        transaction.expires_at = time.monotonic() + 32.0
+        self._send(transaction.response, transaction.mo_sender)
 
     def sweep_expired(self) -> None:
-        """Send 408 Request Timeout for any MO transaction whose MT correlation has expired."""
+        """Time out pending MT delivery and discard expired MO response replays."""
         now = time.monotonic()
         expired = [(cid, ent) for cid, ent in self._in_flight.items() if ent.expires_at <= now]
         for cid, ent in expired:
             del self._in_flight[cid]
             log.warning("MT timeout for MO call-id=%s", ent.mo_request.header("call-id"))
-            self._send(
-                build_sip_response(ent.mo_request, 408, "Request Timeout"),
-                ent.mo_sender,
-            )
+            self._complete_mo(ent, 408, "Request Timeout")
+        expired_mo = [key for key, ent in self._mo_transactions.items()
+                      if ent.response is not None and ent.expires_at <= now]
+        for key in expired_mo:
+            del self._mo_transactions[key]
 
 
 class SmscProtocol(asyncio.DatagramProtocol):
